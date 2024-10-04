@@ -103,7 +103,7 @@ def get_conversation_chain(vectorstore):
     return conversation_chain
 
 def is_greeting(text):
-    greetings = r"\b(hi|hello|hey|greetings|good morning|good afternoon|good evening)\b"
+    greetings = r"\b(hi|hello|hey|greetings|good morning|good afternoon|good evening|hi, how are you)\b"
     return bool(re.search(greetings, text.lower()))
 
 def handle_greeting(greeting):
