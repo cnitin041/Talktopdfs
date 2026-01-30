@@ -182,17 +182,28 @@ Answer:"""
         
         # Create chain manually
         def run_chain(question):
-            # Get relevant documents
-            docs = retriever.invoke(question)  # Changed from get_relevant_documents
-            context = format_docs(docs)
-            
-            # Format prompt
-            full_prompt = template.format(context=context, question=question)
-            
-            # Get response
-            response = llm.invoke(full_prompt)
-            
-            return response
+            try:
+                # Get relevant documents
+                docs = retriever.invoke(question)  # Changed from get_relevant_documents
+                
+                if not docs:
+                    return "I couldn't find any relevant information in the documents to answer your question."
+                
+                context = format_docs(docs)
+                
+                # Format prompt
+                full_prompt = template.format(context=context, question=question)
+                
+                # Get response
+                response = llm.invoke(full_prompt)
+                
+                return response
+            except Exception as e:
+                import traceback
+                error_details = traceback.format_exc()
+                st.error(f"Error in chain execution: {str(e)}")
+                st.code(error_details, language="python")
+                return f"Sorry, I encountered an error: {str(e)}"
         
         return run_chain
         
