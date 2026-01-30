@@ -183,7 +183,7 @@ Answer:"""
         # Create chain manually
         def run_chain(question):
             # Get relevant documents
-            docs = retriever.get_relevant_documents(question)
+            docs = retriever.invoke(question)  # Changed from get_relevant_documents
             context = format_docs(docs)
             
             # Format prompt
