@@ -1,15 +1,13 @@
 import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
-from langchain_text_splitters import CharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.language_models.llms import LLM
-from huggingface_hub import InferenceClient
-from typing import Any, List, Optional
+from langchain_community.llms import HuggingFaceHub
 import re
 import os
 
@@ -22,7 +20,8 @@ css = '''
     padding: 1.5rem;
     border-radius: 0.5rem;
     margin-bottom: 1rem;
-    display: flex
+    display: flex;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 .chat-message.user {
@@ -34,21 +33,26 @@ css = '''
 }
 
 .chat-message .avatar {
-    width: 20%;
+    width: 15%;
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
 .chat-message .avatar i {
-    font-size: 3.5rem;
+    font-size: 2.5rem;
     color: #fff;
 }
 
 .chat-message .message {
-    width: 80%;
+    width: 85%;
     padding: 0 1.5rem;
     color: #fff;
+    line-height: 1.6;
+}
+
+.stButton>button {
+    width: 100%;
 }
 </style>
 '''
@@ -71,168 +75,329 @@ user_template = '''
 </div>
 '''
 
-class HuggingFaceLLM(LLM):
-    """Custom LLM wrapper for HuggingFace Inference API."""
-    model_id: str = "google/flan-t5-base"
-    max_new_tokens: int = 512
-    temperature: float = 0.3
-    client: Any = None
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-        self.client = InferenceClient(token=token)
-    
-    @property
-    def _llm_type(self) -> str:
-        return "huggingface_inference"
-    
-    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
-        try:
-            response = self.client.text_generation(
-                prompt,
-                model=self.model_id,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-            )
-            return response
-        except Exception as e:
-            return f"Error generating response: {str(e)}"
-
 def get_pdf_text(pdf_docs):
+    """Extract text from uploaded PDF files."""
     text = ""
     for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
+        try:
+            pdf_reader = PdfReader(pdf)
+            for page in pdf_reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+        except Exception as e:
+            st.warning(f"Error reading {pdf.name}: {str(e)}")
     return text
 
 def get_text_chunks(text):
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
+    """Split text into chunks for processing."""
+    text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
-        length_function=len
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
     chunks = text_splitter.split_text(text)
     return chunks
 
 def get_vectorstore(text_chunks):
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+    """Create FAISS vector store from text chunks."""
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
     vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
     return vectorstore
 
 def get_conversation_chain(vectorstore):
-    llm = HuggingFaceLLM(model_id="google/flan-t5-base", temperature=0.3, max_new_tokens=512)
+    """Create the RAG conversation chain."""
     
-    template = """Use the following context to answer the question. If you don't know the answer, say you don't know.
+    # Try to get HuggingFace token
+    hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    
+    if not hf_token:
+        st.error("⚠️ HuggingFace API token not found!")
+        st.info("Please set HF_TOKEN in your .env file or environment variables.")
+        st.code("HF_TOKEN=your_token_here", language="bash")
+        st.markdown("Get your token from: https://huggingface.co/settings/tokens")
+        return None
+    
+    try:
+        # Use a more reliable model with better performance
+        llm = HuggingFaceHub(
+            repo_id="google/flan-t5-large",  # Upgraded to large for better quality
+            model_kwargs={
+                "temperature": 0.5,
+                "max_length": 512,
+                "max_new_tokens": 256
+            },
+            huggingfacehub_api_token=hf_token
+        )
+        
+        # Enhanced prompt template
+        template = """You are a helpful assistant that answers questions based on the provided context from PDF documents.
 
-Context: {context}
+Context from documents:
+{context}
 
 Question: {question}
 
+Instructions:
+- Answer the question based ONLY on the context provided above
+- If the answer is not in the context, say "I don't have enough information in the documents to answer this question."
+- Be concise but complete
+- Use specific details from the context when possible
+
 Answer:"""
-    
-    prompt = PromptTemplate.from_template(template)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-    
-    chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-    return chain
+        
+        prompt = PromptTemplate.from_template(template)
+        retriever = vectorstore.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 4}  # Retrieve top 4 most relevant chunks
+        )
+        
+        def format_docs(docs):
+            """Format retrieved documents."""
+            formatted = []
+            for i, doc in enumerate(docs, 1):
+                formatted.append(f"[Excerpt {i}]\n{doc.page_content}")
+            return "\n\n".join(formatted)
+        
+        chain = (
+            {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+        
+        return chain
+        
+    except Exception as e:
+        st.error(f"Error creating conversation chain: {str(e)}")
+        return None
 
 def is_greeting(text):
-    greetings = r"\b(hi|hello|hey|greetings|good morning|good afternoon|good evening|hi, how are you)\b"
-    return bool(re.search(greetings, text.lower()))
+    """Check if the input is a greeting."""
+    greetings = r"\b(hi|hello|hey|greetings|good morning|good afternoon|good evening)\b"
+    return bool(re.search(greetings, text.lower().strip()))
 
 def handle_greeting(greeting):
+    """Generate appropriate greeting response."""
+    greeting_lower = greeting.lower().strip()
     responses = {
-        "hi": "Hi there! How can I help you with your documents today?",
-        "hello": "Hello! I'm ready to assist you with any questions about your PDFs.",
-        "hey": "Hey! What would you like to know about your documents?",
-        "greetings": "Greetings! I'm here to help you with your PDF queries.",
-        "good morning": "Good morning! How may I assist you with your documents today?",
-        "good afternoon": "Good afternoon! What questions do you have about your PDFs?",
-        "good evening": "Good evening! I'm here to help with any document-related questions."
+        "hi": "Hi there! 👋 How can I help you with your documents today?",
+        "hello": "Hello! 👋 I'm ready to assist you with any questions about your PDFs.",
+        "hey": "Hey! 👋 What would you like to know about your documents?",
+        "greetings": "Greetings! 👋 I'm here to help you with your PDF queries.",
+        "good morning": "Good morning! ☀️ How may I assist you with your documents today?",
+        "good afternoon": "Good afternoon! 🌤️ What questions do you have about your PDFs?",
+        "good evening": "Good evening! 🌙 I'm here to help with any document-related questions."
     }
-    return responses.get(greeting.lower(), "Hello! How can I assist you with your documents today?")
+    
+    for key in responses:
+        if key in greeting_lower:
+            return responses[key]
+    
+    return "Hello! 👋 How can I assist you with your documents today?"
 
 def handle_userinput(user_question):
+    """Process user input and generate response."""
+    
+    # Handle greetings
     if is_greeting(user_question):
-        st.write(bot_template.replace("{{MSG}}", handle_greeting(user_question)), unsafe_allow_html=True)
+        response = handle_greeting(user_question)
+        st.session_state.chat_history.append(("user", user_question))
+        st.session_state.chat_history.append(("bot", response))
+        display_chat_history()
         return
 
+    # Check if documents are processed
     if "conversation" not in st.session_state or st.session_state.conversation is None:
-        st.error("Please process your documents before asking questions.")
+        st.error("⚠️ Please upload and process your PDF documents first before asking questions.")
         return
-
-    if st.session_state.chat_history is None:
-        st.session_state.chat_history = []
 
     try:
-        # Add debug info
-        st.info("Searching documents...")
-        answer = st.session_state.conversation.invoke(user_question)
-        st.success(f"Got answer: {answer[:100]}...")  # Show first 100 chars
-        
-        st.session_state.chat_history.append((user_question, answer))
-
-        for question, ans in st.session_state.chat_history:
-            st.write(user_template.replace("{{MSG}}", question), unsafe_allow_html=True)
-            st.write(bot_template.replace("{{MSG}}", ans), unsafe_allow_html=True)
+        # Show loading indicator
+        with st.spinner("🔍 Searching through your documents..."):
+            # Get response from chain
+            answer = st.session_state.conversation.invoke(user_question)
             
-    except Exception as e:
-        st.error(f"Error during question answering: {str(e)}")
-        st.exception(e)  # This will show the full stack trace
+            # Clean up the answer
+            answer = answer.strip()
+            
+            # Update chat history
+            st.session_state.chat_history.append(("user", user_question))
+            st.session_state.chat_history.append(("bot", answer))
         
+        # Display all messages
+        display_chat_history()
+        
+    except Exception as e:
+        error_msg = f"Error generating response: {str(e)}"
+        st.error(error_msg)
+        
+        # Provide helpful troubleshooting tips
+        with st.expander("🔧 Troubleshooting Tips"):
+            st.markdown("""
+            **Common issues:**
+            1. **API Token**: Make sure your HuggingFace token is valid
+            2. **Rate Limits**: Free tier has usage limits - wait a moment and try again
+            3. **Model Loading**: The model might be loading for the first time (can take 1-2 minutes)
+            4. **Network**: Check your internet connection
+            
+            **To fix:**
+            - Verify your HF_TOKEN in the .env file
+            - Try asking a simpler question
+            - Wait a few seconds and try again
+            - Check HuggingFace status: https://status.huggingface.co/
+            """)
+
+def display_chat_history():
+    """Display all chat messages."""
+    for role, message in st.session_state.chat_history:
+        if role == "user":
+            st.write(user_template.replace("{{MSG}}", message), unsafe_allow_html=True)
+        else:
+            st.write(bot_template.replace("{{MSG}}", message), unsafe_allow_html=True)
+
 def clear_chat():
+    """Clear chat history and conversation."""
     st.session_state.chat_history = []
     st.session_state.conversation = None
+    st.session_state.processed_docs = False
 
 def main():
+    """Main application function."""
     load_dotenv()
-    st.set_page_config(page_title="Chat with multiple PDFs",
-                       page_icon=":books:")
+    
+    st.set_page_config(
+        page_title="Chat with PDFs",
+        page_icon="📚",
+        layout="wide"
+    )
     st.write(css, unsafe_allow_html=True)
 
+    # Initialize session state
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
+    if "processed_docs" not in st.session_state:
+        st.session_state.processed_docs = False
 
-    st.header("Chat with multiple PDFs :books:")
+    # Header
+    st.title("📚 Chat with Multiple PDFs")
+    st.markdown("Upload your PDF documents and ask questions about their content!")
     
     # Sidebar
     with st.sidebar:
-        st.subheader("Your documents")
-        pdf_docs = st.file_uploader(
-            "Upload your PDFs here and click on 'Process'", accept_multiple_files=True)
-        if st.button("Process"):
-            if not pdf_docs:
-                st.error("Please upload PDF documents before processing.")
-            else:
-                with st.spinner("Processing"):
-                    try:
-                        raw_text = get_pdf_text(pdf_docs)
-                        text_chunks = get_text_chunks(raw_text)
-                        vectorstore = get_vectorstore(text_chunks)
-                        st.session_state.conversation = get_conversation_chain(vectorstore)
-                        st.success("Processing complete! You can now ask questions about your documents.")
-                    except Exception as e:
-                        st.error(f"An error occurred during processing: {str(e)}")
+        st.header("📁 Document Management")
         
-        if st.button("Clear Chat"):
+        # File uploader
+        pdf_docs = st.file_uploader(
+            "Upload your PDFs here",
+            accept_multiple_files=True,
+            type=['pdf'],
+            help="You can upload multiple PDF files"
+        )
+        
+        # Show uploaded files
+        if pdf_docs:
+            st.success(f"✅ {len(pdf_docs)} file(s) uploaded")
+            with st.expander("📄 Uploaded Files"):
+                for pdf in pdf_docs:
+                    st.text(f"• {pdf.name}")
+        
+        # Process button
+        if st.button("🚀 Process Documents", type="primary"):
+            if not pdf_docs:
+                st.error("❌ Please upload at least one PDF document.")
+            else:
+                with st.spinner("Processing your documents..."):
+                    try:
+                        # Extract text
+                        st.info("📖 Extracting text from PDFs...")
+                        raw_text = get_pdf_text(pdf_docs)
+                        
+                        if not raw_text.strip():
+                            st.error("❌ No text could be extracted from the PDFs. They might be image-based or empty.")
+                            return
+                        
+                        # Create chunks
+                        st.info("✂️ Splitting text into chunks...")
+                        text_chunks = get_text_chunks(raw_text)
+                        st.success(f"Created {len(text_chunks)} text chunks")
+                        
+                        # Create vector store
+                        st.info("🧠 Creating vector database...")
+                        vectorstore = get_vectorstore(text_chunks)
+                        
+                        # Create conversation chain
+                        st.info("🔗 Setting up conversation chain...")
+                        conversation_chain = get_conversation_chain(vectorstore)
+                        
+                        if conversation_chain:
+                            st.session_state.conversation = conversation_chain
+                            st.session_state.processed_docs = True
+                            st.success("✅ Processing complete! You can now ask questions.")
+                        else:
+                            st.error("❌ Failed to create conversation chain. Check your API token.")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error during processing: {str(e)}")
+                        st.exception(e)
+        
+        # Clear chat button
+        st.divider()
+        if st.button("🗑️ Clear Chat History"):
             clear_chat()
-            st.success("Chat cleared!")
+            st.success("✅ Chat history cleared!")
+            st.rerun()
+        
+        # Info section
+        st.divider()
+        st.markdown("### ℹ️ How to Use")
+        st.markdown("""
+        1. Upload one or more PDF files
+        2. Click **Process Documents**
+        3. Wait for processing to complete
+        4. Ask questions about your documents
+        5. Get AI-powered answers!
+        """)
+        
+        # Setup instructions
+        with st.expander("⚙️ Setup Instructions"):
+            st.markdown("""
+            **Required Environment Variable:**
+            
+            Create a `.env` file with:
+            ```
+            HF_TOKEN=your_huggingface_token_here
+            ```
+            
+            Get your free token from:
+            [HuggingFace Settings](https://huggingface.co/settings/tokens)
+            
+            **Install Dependencies:**
+            ```bash
+            pip install streamlit python-dotenv PyPDF2 
+            pip install langchain langchain-huggingface 
+            pip install langchain-community faiss-cpu 
+            pip install huggingface-hub sentence-transformers
+            ```
+            """)
 
     # Main chat interface
-    user_question = st.text_input("Ask a question about your documents:")
+    st.divider()
+    
+    if st.session_state.processed_docs:
+        st.success("✅ Documents processed - Ready to answer questions!")
+    else:
+        st.info("👈 Please upload and process your PDF documents to get started")
+    
+    # Chat input
+    user_question = st.chat_input("Ask a question about your documents...")
+    
     if user_question:
         handle_userinput(user_question)
 
