@@ -5,7 +5,6 @@ from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.llms import HuggingFaceHub
-from langchain_core.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 import re
 
@@ -92,13 +91,11 @@ def get_vectorstore(text_chunks):
 
 def get_conversation_chain(vectorstore):
     llm = HuggingFaceHub(repo_id="google/flan-t5-base", model_kwargs={"temperature": 0.3, "max_length": 512})
-
-    memory = ConversationBufferMemory(
-        memory_key='chat_history', return_messages=True)
+    
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=llm,
         retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
-        memory=memory
+        return_source_documents=True
     )
     return conversation_chain
 
@@ -127,19 +124,26 @@ def handle_userinput(user_question):
         st.error("Please process your documents before asking questions.")
         return
 
-    response = st.session_state.conversation({'question': user_question})
-    st.session_state.chat_history = response['chat_history']
+    # Initialize chat history if not exists
+    if st.session_state.chat_history is None:
+        st.session_state.chat_history = []
 
-    for i, message in enumerate(st.session_state.chat_history):
-        if i % 2 == 0:
-            st.write(user_template.replace(
-                "{{MSG}}", message.content), unsafe_allow_html=True)
-        else:
-            st.write(bot_template.replace(
-                "{{MSG}}", message.content), unsafe_allow_html=True)
+    # Get response from conversation chain
+    response = st.session_state.conversation({
+        'question': user_question,
+        'chat_history': st.session_state.chat_history
+    })
+    
+    # Update chat history
+    st.session_state.chat_history.append((user_question, response['answer']))
+
+    # Display all messages
+    for question, answer in st.session_state.chat_history:
+        st.write(user_template.replace("{{MSG}}", question), unsafe_allow_html=True)
+        st.write(bot_template.replace("{{MSG}}", answer), unsafe_allow_html=True)
 
 def clear_chat():
-    st.session_state.chat_history = None
+    st.session_state.chat_history = []
     st.session_state.conversation = None
 
 def main():
@@ -151,7 +155,7 @@ def main():
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "chat_history" not in st.session_state:
-        st.session_state.chat_history = None
+        st.session_state.chat_history = []
 
     st.header("Chat with multiple PDFs :books:")
     
