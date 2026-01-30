@@ -91,7 +91,7 @@ def get_vectorstore(text_chunks):
     return vectorstore
 
 def get_conversation_chain(vectorstore):
-    llm = HuggingFaceEndpoint(repo_id="google/flan-t5-base", temperature=0.3, max_length=512)
+    llm = HuggingFaceEndpoint(repo_id="google/flan-t5-base", temperature=0.3, max_new_tokens=512)
     
     template = """Use the following context to answer the question. If you don't know the answer, say you don't know.
 
