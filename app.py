@@ -112,8 +112,13 @@ def get_vectorstore(text_chunks):
 def get_conversation_chain(vectorstore):
     """Create the RAG conversation chain."""
     
-    # Try to get HuggingFace token
-    hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    # Try to get HuggingFace token (works for both local and Streamlit Cloud)
+    try:
+        # Try Streamlit secrets first (for Streamlit Cloud)
+        hf_token = st.secrets.get("HF_TOKEN")
+    except:
+        # Fall back to environment variables (for local development)
+        hf_token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
     
     if not hf_token:
         st.error("⚠️ HuggingFace API token not found!")
@@ -125,11 +130,11 @@ def get_conversation_chain(vectorstore):
     try:
         # Use a more reliable model with better performance
         llm = HuggingFaceHub(
-            repo_id="google/flan-t5-large",  # Upgraded to large for better quality
+            repo_id="google/flan-t5-large",
+            task="text2text-generation",  # Required task parameter
             model_kwargs={
                 "temperature": 0.5,
                 "max_length": 512,
-                "max_new_tokens": 256
             },
             huggingfacehub_api_token=hf_token
         )
