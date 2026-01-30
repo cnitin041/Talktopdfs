@@ -172,21 +172,25 @@ def handle_userinput(user_question):
         st.error("Please process your documents before asking questions.")
         return
 
-    # Initialize chat history if not exists
     if st.session_state.chat_history is None:
         st.session_state.chat_history = []
 
-    # Get response from chain (returns string directly)
-    answer = st.session_state.conversation.invoke(user_question)
-    
-    # Update chat history
-    st.session_state.chat_history.append((user_question, answer))
+    try:
+        # Add debug info
+        st.info("Searching documents...")
+        answer = st.session_state.conversation.invoke(user_question)
+        st.success(f"Got answer: {answer[:100]}...")  # Show first 100 chars
+        
+        st.session_state.chat_history.append((user_question, answer))
 
-    # Display all messages
-    for question, ans in st.session_state.chat_history:
-        st.write(user_template.replace("{{MSG}}", question), unsafe_allow_html=True)
-        st.write(bot_template.replace("{{MSG}}", ans), unsafe_allow_html=True)
-
+        for question, ans in st.session_state.chat_history:
+            st.write(user_template.replace("{{MSG}}", question), unsafe_allow_html=True)
+            st.write(bot_template.replace("{{MSG}}", ans), unsafe_allow_html=True)
+            
+    except Exception as e:
+        st.error(f"Error during question answering: {str(e)}")
+        st.exception(e)  # This will show the full stack trace
+        
 def clear_chat():
     st.session_state.chat_history = []
     st.session_state.conversation = None
