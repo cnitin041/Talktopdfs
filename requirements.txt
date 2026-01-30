@@ -1,5 +1,6 @@
 langchain
 langchain_community
+langchain-text-splitters
 PyPDF2
 python-dotenv
 streamlit
