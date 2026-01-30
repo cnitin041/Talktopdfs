@@ -5,9 +5,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-from langchain_community.llms import HuggingFaceHub
 import re
 import os
 
@@ -128,16 +125,31 @@ def get_conversation_chain(vectorstore):
         return None
     
     try:
-        # Use a more reliable model with better performance
-        llm = HuggingFaceHub(
-            repo_id="google/flan-t5-large",
-            task="text2text-generation",  # Required task parameter
-            model_kwargs={
-                "temperature": 0.5,
-                "max_length": 512,
-            },
-            huggingfacehub_api_token=hf_token
-        )
+        from huggingface_hub import InferenceClient
+        
+        # Create inference client
+        client = InferenceClient(token=hf_token)
+        
+        # Create a custom LLM wrapper
+        class HuggingFaceInferenceLLM:
+            def __init__(self, client, model_id="google/flan-t5-large"):
+                self.client = client
+                self.model_id = model_id
+            
+            def invoke(self, prompt):
+                try:
+                    response = self.client.text_generation(
+                        prompt,
+                        model=self.model_id,
+                        max_new_tokens=512,
+                        temperature=0.5,
+                        return_full_text=False
+                    )
+                    return response
+                except Exception as e:
+                    return f"Error: {str(e)}"
+        
+        llm = HuggingFaceInferenceLLM(client)
         
         # Enhanced prompt template
         template = """You are a helpful assistant that answers questions based on the provided context from PDF documents.
@@ -168,14 +180,21 @@ Answer:"""
                 formatted.append(f"[Excerpt {i}]\n{doc.page_content}")
             return "\n\n".join(formatted)
         
-        chain = (
-            {"context": retriever | format_docs, "question": RunnablePassthrough()}
-            | prompt
-            | llm
-            | StrOutputParser()
-        )
+        # Create chain manually
+        def run_chain(question):
+            # Get relevant documents
+            docs = retriever.get_relevant_documents(question)
+            context = format_docs(docs)
+            
+            # Format prompt
+            full_prompt = template.format(context=context, question=question)
+            
+            # Get response
+            response = llm.invoke(full_prompt)
+            
+            return response
         
-        return chain
+        return run_chain
         
     except Exception as e:
         st.error(f"Error creating conversation chain: {str(e)}")
@@ -224,8 +243,8 @@ def handle_userinput(user_question):
     try:
         # Show loading indicator
         with st.spinner("🔍 Searching through your documents..."):
-            # Get response from chain
-            answer = st.session_state.conversation.invoke(user_question)
+            # Get response from chain (now it's a function, not a chain object)
+            answer = st.session_state.conversation(user_question)
             
             # Clean up the answer
             answer = answer.strip()
