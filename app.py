@@ -5,7 +5,9 @@ from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.llms import HuggingFaceHub
-from langchain.chains import ConversationalRetrievalChain
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 import re
 
 # CSS styles
@@ -92,12 +94,27 @@ def get_vectorstore(text_chunks):
 def get_conversation_chain(vectorstore):
     llm = HuggingFaceHub(repo_id="google/flan-t5-base", model_kwargs={"temperature": 0.3, "max_length": 512})
     
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
-        return_source_documents=True
+    template = """Use the following context to answer the question. If you don't know the answer, say you don't know.
+
+Context: {context}
+
+Question: {question}
+
+Answer:"""
+    
+    prompt = PromptTemplate.from_template(template)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+    
+    chain = (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
     )
-    return conversation_chain
+    return chain
 
 def is_greeting(text):
     greetings = r"\b(hi|hello|hey|greetings|good morning|good afternoon|good evening|hi, how are you)\b"
@@ -128,19 +145,16 @@ def handle_userinput(user_question):
     if st.session_state.chat_history is None:
         st.session_state.chat_history = []
 
-    # Get response from conversation chain
-    response = st.session_state.conversation({
-        'question': user_question,
-        'chat_history': st.session_state.chat_history
-    })
+    # Get response from chain (returns string directly)
+    answer = st.session_state.conversation.invoke(user_question)
     
     # Update chat history
-    st.session_state.chat_history.append((user_question, response['answer']))
+    st.session_state.chat_history.append((user_question, answer))
 
     # Display all messages
-    for question, answer in st.session_state.chat_history:
+    for question, ans in st.session_state.chat_history:
         st.write(user_template.replace("{{MSG}}", question), unsafe_allow_html=True)
-        st.write(bot_template.replace("{{MSG}}", answer), unsafe_allow_html=True)
+        st.write(bot_template.replace("{{MSG}}", ans), unsafe_allow_html=True)
 
 def clear_chat():
     st.session_state.chat_history = []
