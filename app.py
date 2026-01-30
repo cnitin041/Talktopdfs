@@ -2,12 +2,16 @@ import streamlit as st
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.language_models.llms import LLM
+from huggingface_hub import InferenceClient
+from typing import Any, List, Optional
 import re
+import os
 
 # CSS styles
 css = '''
@@ -67,6 +71,34 @@ user_template = '''
 </div>
 '''
 
+class HuggingFaceLLM(LLM):
+    """Custom LLM wrapper for HuggingFace Inference API."""
+    model_id: str = "google/flan-t5-base"
+    max_new_tokens: int = 512
+    temperature: float = 0.3
+    client: Any = None
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        self.client = InferenceClient(token=token)
+    
+    @property
+    def _llm_type(self) -> str:
+        return "huggingface_inference"
+    
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
+        try:
+            response = self.client.text_generation(
+                prompt,
+                model=self.model_id,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+            )
+            return response
+        except Exception as e:
+            return f"Error generating response: {str(e)}"
+
 def get_pdf_text(pdf_docs):
     text = ""
     for pdf in pdf_docs:
@@ -91,7 +123,7 @@ def get_vectorstore(text_chunks):
     return vectorstore
 
 def get_conversation_chain(vectorstore):
-    llm = HuggingFaceEndpoint(repo_id="google/flan-t5-base", temperature=0.3, max_new_tokens=512)
+    llm = HuggingFaceLLM(model_id="google/flan-t5-base", temperature=0.3, max_new_tokens=512)
     
     template = """Use the following context to answer the question. If you don't know the answer, say you don't know.
 
